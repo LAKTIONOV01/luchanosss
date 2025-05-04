@@ -1,15 +1,22 @@
-from fastapi import Depends, HTTPException
+from datetime import timedelta
+
+from fastapi import Depends, HTTPException, status
 from fastapi.routing import APIRouter
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from api.models import *
+from db.models import User
 from db.session import async_session, get_db
 from db.dals import UserDAL
 from typing import Union, List
 from sqlalchemy.exc import IntegrityError
 from uuid import UUID
 from hashing import Hasher
-
+import settings
+from jose import jwt, JWTError
+from security import create_access_token
+from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordRequestForm
 
 user_router = APIRouter()
 login_router = APIRouter()
@@ -135,13 +142,13 @@ async def authenticate_user(email: str, password: str, db: AsyncSession):
     user = await _get_user_by_email_for_auth(email=email, db=db)
     if user is None:
         return False
-    if not  Hasher.verify_password(password, user.hashed_password):
+    if not Hasher.verify_password(password, user.hashed_password):
         return False
     return user
 
 
 @login_router.post("/token", response_model=Token)
- async def login_for_access_token(
+async def login_for_access_token(
      form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
  ):
      user = await authenticate_user(form_data.username, form_data.password, db)
@@ -156,3 +163,33 @@ async def authenticate_user(email: str, password: str, db: AsyncSession):
          expires_delta=access_token_expires,
      )
      return {"access_token": access_token, "token_type": "bearer"}
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login/token')
+
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail='Could not validate credentials'
+    )
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        email: str = payload.get('sub')
+        print("username/email extracted is ", email)
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = await _get_user_by_email_for_auth(email=email, db=db)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+@login_router.get('/test_auth_endpoints')
+async def sample_endpoint_under_jwt(current_user: User = Depends(get_current_user_from_token)):
+    return {'success': True, 'current_user': current_user}
