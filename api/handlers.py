@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from uuid import UUID
 from hashing import Hasher
 import settings
+from db.dals import PortalRole
 from jose import jwt, JWTError
 from security import create_access_token
 from fastapi.security import OAuth2PasswordBearer
@@ -30,7 +31,8 @@ async def _create_new_user(body: UserCreate, db) -> ShowUser:
                 name=body.name,
                 surname=body.surname,
                 email=body.email,
-                hashed_password=Hasher.get_password_hash(body.password)
+                hashed_password=Hasher.get_password_hash(body.password),
+                roles=[PortalRole.ROLE_PORTAL_USER, ]
             )
             return ShowUser(
                 user_id=user.user_id,
@@ -83,6 +85,54 @@ async def _get_all_users(db) -> [ShowUser]:
             return all_users
 
 
+def check_user_permissions(target_user: User, current_user: User) -> bool:
+    if target_user.user_id != current_user.user_id:
+        # check admin role
+        if not {
+            PortalRole.ROLE_PORTAL_ADMIN,
+            PortalRole.ROLE_PORTAL_SUPERADMIN,
+        }.intersection(current_user.roles):
+            return False
+        # check admin deactivate superadmin attempt
+        if (
+                PortalRole.ROLE_PORTAL_SUPERADMIN in target_user.roles
+                and PortalRole.ROLE_PORTAL_ADMIN in current_user.roles
+        ):
+            return False
+        # check admin deactivate admin attempt
+        if (
+                PortalRole.ROLE_PORTAL_ADMIN in target_user.roles
+                and PortalRole.ROLE_PORTAL_ADMIN in current_user.roles
+        ):
+            return False
+    return True
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login/token')
+
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail='Could not validate credentials'
+    )
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        email: str = payload.get('sub')
+        print("username/email extracted is ", email)
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = await _get_user_by_email_for_auth(email=email, db=db)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
 
 
 @user_router.post("/", response_model=ShowUser)
@@ -94,14 +144,14 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)) -> S
 
 
 @user_router.delete("/", response_model=DeleteUserResponse)
-async def delete_user(user_id: UUID, db: AsyncSession = Depends(get_db)) -> DeleteUserResponse:
+async def delete_user(user_id: UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user_from_token)) -> DeleteUserResponse:
     deleted_user_id = await _delete_user(user_id, db)
     if deleted_user_id is None:
         raise HTTPException(status_code=404, detail=f'User with id {user_id} not found')
     return DeleteUserResponse(deleted_user_id=deleted_user_id)
 
 @user_router.get("/", response_model=ShowUser)
-async def get_user_by_id(user_id: UUID, db: AsyncSession = Depends(get_db)) -> ShowUser:
+async def get_user_by_id(user_id: UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user_from_token)) -> ShowUser:
    user = await _get_user_by_id(user_id, db)
    if user is None:
        raise HTTPException(status_code=404, detail=f'User with id {user_id} not found')
@@ -117,7 +167,7 @@ async def get_all_users(db: AsyncSession = Depends(get_db)) -> ShowUser:
 
 
 @user_router.patch("/", response_model=UpdateUserResponse)
-async def get_user_by_id(user_id: UUID, body: UpdateUserRequest, db: AsyncSession = Depends(get_db)) -> UpdateUserResponse:
+async def get_user_by_id(user_id: UUID, body: UpdateUserRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user_from_token)) -> UpdateUserResponse:
     if body.dict(exclude_none=True) == {}:
         raise HTTPException(status_code=422)
     user = await _get_user_by_id(user_id, db)
@@ -165,29 +215,7 @@ async def login_for_access_token(
      return {"access_token": access_token, "token_type": "bearer"}
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/login/token')
 
-
-async def get_current_user_from_token(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail='Could not validate credentials'
-    )
-    try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
-        email: str = payload.get('sub')
-        print("username/email extracted is ", email)
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    user = await _get_user_by_email_for_auth(email=email, db=db)
-    if user is None:
-        raise credentials_exception
-    return user
 
 
 @login_router.get('/test_auth_endpoints')
